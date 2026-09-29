@@ -39,6 +39,7 @@
     border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 8px;
     padding: 0 12px;
+    position: relative;
   }
   #toolbar .title {
     margin-left: auto; color: var(--muted); font-weight: 600; letter-spacing: 0.5px;
@@ -90,6 +91,34 @@
     display: none;
     z-index: 20;
   }
+  #history-panel {
+    position: absolute; top: calc(var(--toolbar-h) - 4px); left: 10px;
+    width: min(320px, calc(100vw - 20px));
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+    padding: 6px; display: none; z-index: 15;
+  }
+  #history-panel.open { display: block; }
+  .history-item {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; text-align: left;
+    background: transparent; border: 0; border-radius: 6px;
+    padding: 7px 9px; cursor: pointer;
+  }
+  .history-item:hover { background: #f3f4f6; }
+  .history-item.current { background: var(--drop-bg); }
+  .history-item .h-title {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 500;
+  }
+  .history-item .h-time { color: var(--muted); font-size: 12px; flex: none; }
+  .history-empty { color: var(--muted); padding: 10px; text-align: center; }
+  .history-foot {
+    border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px;
+    display: flex; justify-content: flex-end;
+  }
+  .history-foot button { padding: 4px 10px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -97,8 +126,10 @@
     <button id="btn-open">📂 Open</button>
     <button id="btn-save">💾 Save as</button>
     <button id="btn-toggle-editor" title="Toggle editor pane">📖 Reader</button>
+    <button id="btn-history" title="Recent documents">🕘 History</button>
     <input id="file-input" type="file" accept=".md,.markdown,.txt" hidden>
     <span class="title">MDReader</span>
+    <div id="history-panel"></div>
   </div>
   <div id="main">
     <textarea id="editor" spellcheck="false" placeholder="Type or drop Markdown here…"></textarea>
@@ -118,11 +149,15 @@
     const btnOpen   = document.getElementById('btn-open');
     const btnSave   = document.getElementById('btn-save');
     const btnToggle = document.getElementById('btn-toggle-editor');
+    const btnHistory = document.getElementById('btn-history');
+    const historyPanel = document.getElementById('history-panel');
     const fileInput = document.getElementById('file-input');
     const toast     = document.getElementById('toast');
 
     const STORAGE_KEY      = 'mdreader:content';
     const READER_MODE_KEY  = 'mdreader:reader-mode';
+    const HISTORY_KEY      = 'mdreader:history';
+    const MAX_HISTORY      = 10;
 
     const WELCOME = [
       '# Welcome to MDReader',
@@ -230,9 +265,178 @@
       persistT = setTimeout(persist, 150);
     }
 
+    // --- History (recent documents) ---
+    // history[0] is the live document currently in the editor; editing updates
+    // it in place. Opening a file or switching selects/creates an entry, which
+    // then becomes the live head. At most MAX_HISTORY entries are kept.
+    function loadHistory() {
+      try {
+        const raw = localStorage.getItem(HISTORY_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return [];
+        return arr.filter((e) => e && typeof e.id === 'string' && typeof e.content === 'string');
+      } catch (_) { return []; }
+    }
+
+    function saveHistory(arr) {
+      try { localStorage.setItem(HISTORY_KEY, JSON.stringify(arr)); } catch (_) {}
+    }
+
+    function newEntry(content, name) {
+      const entry = {
+        id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+        content,
+        ts: Date.now(),
+      };
+      if (name) entry.name = name;
+      return entry;
+    }
+
+    function snapshotCurrent() {
+      const content = editor.value;
+      if (!content.trim()) return;
+      const h = loadHistory();
+      if (h.length === 0) {
+        h.unshift(newEntry(content));
+      } else if (h[0].content !== content) {
+        h[0].content = content;
+        h[0].ts = Date.now();
+      } else {
+        return;
+      }
+      saveHistory(h);
+    }
+
+    function pushDocument(content, name) {
+      const h = loadHistory();
+      const idx = h.findIndex((e) => e.content === content);
+      let entry;
+      if (idx >= 0) {
+        entry = h.splice(idx, 1)[0];
+      } else {
+        entry = newEntry(content, name);
+      }
+      if (name) entry.name = name;
+      entry.ts = Date.now();
+      h.unshift(entry);
+      if (h.length > MAX_HISTORY) h.length = MAX_HISTORY;
+      saveHistory(h);
+    }
+
+    function titleOf(text) {
+      const line = (text.split('\n').find((l) => l.trim()) || '').trim();
+      const t = line.replace(/^#{1,6}\s*/, '').replace(/[*_`>~[\]]/g, '').trim();
+      return t || 'Untitled';
+    }
+
+    function fmtTime(ts) {
+      const d = new Date(ts);
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      return d.toDateString() === now.toDateString()
+        ? pad(d.getHours()) + ':' + pad(d.getMinutes())
+        : pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    }
+
+    function renderHistory() {
+      const h = loadHistory();
+      historyPanel.textContent = '';
+      if (!h.length) {
+        const empty = document.createElement('div');
+        empty.className = 'history-empty';
+        empty.textContent = 'No history yet';
+        historyPanel.appendChild(empty);
+      } else {
+        h.forEach((e, i) => {
+          const btn = document.createElement('button');
+          btn.className = 'history-item' + (i === 0 ? ' current' : '');
+          btn.dataset.id = e.id;
+          const title = document.createElement('span');
+          title.className = 'h-title';
+          title.textContent = e.name || titleOf(e.content);
+          title.title = title.textContent;
+          const time = document.createElement('span');
+          time.className = 'h-time';
+          time.textContent = fmtTime(e.ts);
+          btn.appendChild(title);
+          btn.appendChild(time);
+          historyPanel.appendChild(btn);
+        });
+      }
+      const foot = document.createElement('div');
+      foot.className = 'history-foot';
+      const clear = document.createElement('button');
+      clear.id = 'btn-clear-history';
+      clear.textContent = 'Clear history';
+      foot.appendChild(clear);
+      historyPanel.appendChild(foot);
+    }
+
+    function loadHistoryEntry(id) {
+      snapshotCurrent();
+      const h = loadHistory();
+      const idx = h.findIndex((e) => e.id === id);
+      if (idx < 0) return;
+      const entry = h.splice(idx, 1)[0];
+      entry.ts = Date.now();
+      h.unshift(entry);
+      saveHistory(h);
+      editor.value = entry.content;
+      render();
+      persist();
+      closeHistory();
+    }
+
+    let historyOpen = false;
+
+    function openHistory() {
+      historyOpen = true;
+      renderHistory();
+      historyPanel.classList.add('open');
+    }
+
+    function closeHistory() {
+      historyOpen = false;
+      historyPanel.classList.remove('open');
+    }
+
+    btnHistory.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (historyOpen) closeHistory(); else openHistory();
+    });
+
+    historyPanel.addEventListener('click', (e) => {
+      if (e.target.closest('#btn-clear-history')) {
+        if (window.confirm('Clear all recent documents?')) {
+          saveHistory([]);
+          renderHistory();
+        }
+        return;
+      }
+      const item = e.target.closest('.history-item');
+      if (item) loadHistoryEntry(item.dataset.id);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!historyOpen) return;
+      if (historyPanel.contains(e.target) || btnHistory.contains(e.target)) return;
+      closeHistory();
+    });
+
+    let snapshotT = 0;
+    function scheduleSnapshot() {
+      clearTimeout(snapshotT);
+      snapshotT = setTimeout(() => {
+        snapshotCurrent();
+        if (historyOpen) renderHistory();
+      }, 1500);
+    }
+
     editor.addEventListener('input', () => {
       scheduleRender();
       schedulePersist();
+      scheduleSnapshot();
     });
 
     // --- File IO ---
@@ -251,6 +455,7 @@
         editor.value = String(reader.result || '');
         render();
         persist();
+        pushDocument(editor.value, file.name);
       };
       reader.onerror = () => showError('Could not read file: ' + file.name);
       reader.readAsText(file);
@@ -323,6 +528,7 @@
     loadInitial();
     loadReaderMode();
     render();
+    snapshotCurrent();
   })();
   </script>
 </body>
